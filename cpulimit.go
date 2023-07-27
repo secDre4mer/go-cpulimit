@@ -104,7 +104,6 @@ func (l *Limiter) run() {
 		if l.stop {
 			if locked {
 				l.mutex.Unlock()
-				locked = false
 			}
 			break
 		}
