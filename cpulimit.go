@@ -22,20 +22,20 @@ const (
 type Limiter struct {
 	// MaxCPUUsage specifies the maximum CPU usage; wait will block if the
 	// average CPU usage during the previous measurements exceeds this value.
-	MaxCPUUsage        float64
+	MaxCPUUsage float64
 	// MeasureInterval specifies how often the CPU usage should be measured.
-	MeasureInterval    time.Duration
+	MeasureInterval time.Duration
 	// Measurements specifies how many measurements should be retained for the
 	// average CPU usage calculation.
-	Measurements       int
+	Measurements int
 	// CurrentProcessOnly specifies that only the CPU usage of the current process
 	// should be measured; otherwise, the full CPU usage is measured.
 	CurrentProcessOnly bool
 
-	stop            bool
-	wg              *sync.WaitGroup
-	mutex           *sync.RWMutex
-	self *process.Process
+	stop  bool
+	wg    *sync.WaitGroup
+	mutex *sync.RWMutex
+	self  *process.Process
 }
 
 // Start starts the CPU limiter. If there are undefined variables
@@ -74,6 +74,15 @@ func (l *Limiter) Stop() {
 func (l *Limiter) Wait() {
 	l.mutex.RLock()
 	l.mutex.RUnlock()
+}
+
+// AboveLimit reports if the CPU usage is above MaxCPUUsage
+func (l *Limiter) AboveLimit() bool {
+	canLock := l.mutex.TryRLock()
+	if canLock {
+		l.mutex.RUnlock()
+	}
+	return !canLock
 }
 
 func (l *Limiter) run() {
