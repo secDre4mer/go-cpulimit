@@ -1,6 +1,7 @@
 package cpulimit
 
 import (
+	"context"
 	"os"
 	"sync"
 	"time"
@@ -74,6 +75,23 @@ func (l *Limiter) Stop() {
 func (l *Limiter) Wait() {
 	l.mutex.RLock()
 	l.mutex.RUnlock()
+}
+
+func (l *Limiter) WaitContext(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	// Wait until the mutex is unlocked or the context is done
+	var mutexFree = make(chan struct{})
+	go func() {
+		l.mutex.RLock()
+		l.mutex.RUnlock()
+		close(mutexFree)
+	}()
+	select {
+	case <-mutexFree:
+	case <-ctx.Done():
+	}
 }
 
 // AboveLimit reports if the CPU usage is above MaxCPUUsage
