@@ -33,10 +33,13 @@ type Limiter struct {
 	// should be measured; otherwise, the full CPU usage is measured.
 	CurrentProcessOnly bool
 
-	stop  bool
-	wg    *sync.WaitGroup
-	mutex *sync.RWMutex
-	self  *process.Process
+	stop bool
+	wg   *sync.WaitGroup
+	self *process.Process
+
+	// usageBelowLimit will be blocking while the CPU usage is above MaxCPUUsage,
+	// and will be closed when the CPU usage is below MaxCPUUsage.
+	usageBelowLimit chan struct{}
 }
 
 // Start starts the CPU limiter. If there are undefined variables
@@ -52,8 +55,8 @@ func (l *Limiter) Start() error {
 		l.Measurements = DefaultMeasurements
 	}
 	l.wg = &sync.WaitGroup{}
-	l.mutex = &sync.RWMutex{}
 	l.wg.Add(1)
+	l.usageBelowLimit = make(chan struct{})
 	if l.CurrentProcessOnly {
 		var err error
 		l.self, err = process.NewProcess(int32(os.Getpid()))
@@ -73,34 +76,27 @@ func (l *Limiter) Stop() {
 
 // Wait waits until the CPU usage is below MaxCPUUsage
 func (l *Limiter) Wait() {
-	l.mutex.RLock()
-	l.mutex.RUnlock()
+	l.WaitContext(context.Background())
 }
 
 func (l *Limiter) WaitContext(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	// Wait until the mutex is unlocked or the context is done
-	var mutexFree = make(chan struct{})
-	go func() {
-		l.mutex.RLock()
-		l.mutex.RUnlock()
-		close(mutexFree)
-	}()
 	select {
-	case <-mutexFree:
+	case <-l.usageBelowLimit:
 	case <-ctx.Done():
 	}
 }
 
 // AboveLimit reports if the CPU usage is above MaxCPUUsage
 func (l *Limiter) AboveLimit() bool {
-	canLock := l.mutex.TryRLock()
-	if canLock {
-		l.mutex.RUnlock()
+	select {
+	case <-l.usageBelowLimit:
+		return false
+	default:
+		return true
 	}
-	return !canLock
 }
 
 func (l *Limiter) run() {
@@ -111,7 +107,7 @@ func (l *Limiter) run() {
 		all1     float64
 		all2     float64
 		cpuUsage float64
-		locked   bool
+		locked   = true
 		m        = make([]float64, l.Measurements) // measurements
 	)
 	tk := time.NewTicker(l.MeasureInterval)
@@ -121,7 +117,7 @@ func (l *Limiter) run() {
 	for range tk.C {
 		if l.stop {
 			if locked {
-				l.mutex.Unlock()
+				close(l.usageBelowLimit)
 			}
 			break
 		}
@@ -131,12 +127,14 @@ func (l *Limiter) run() {
 		m[counter] = cpuUsage
 		if average(m) > l.MaxCPUUsage {
 			if !locked {
-				l.mutex.Lock()
+				// Create a new, blocking channel to signal that the CPU usage is above the limit
+				l.usageBelowLimit = make(chan struct{})
 				locked = true
 			}
 		} else {
 			if locked {
-				l.mutex.Unlock()
+				// Close the channel to signal that the CPU usage is below the limit
+				close(l.usageBelowLimit)
 				locked = false
 			}
 		}
