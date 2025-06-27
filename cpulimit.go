@@ -37,9 +37,10 @@ type Limiter struct {
 	wg   *sync.WaitGroup
 	self *process.Process
 
-	// usageBelowLimit will be blocking while the CPU usage is above MaxCPUUsage,
+	// waitForBelowLimit will be blocking while the CPU usage is above MaxCPUUsage,
 	// and will be closed when the CPU usage is below MaxCPUUsage.
-	usageBelowLimit chan struct{}
+	waitForBelowLimit   chan struct{}
+	currentlyBelowLimit bool // Indicates if the CPU usage is currently below the limit
 }
 
 // Start starts the CPU limiter. If there are undefined variables
@@ -56,7 +57,7 @@ func (l *Limiter) Start() error {
 	}
 	l.wg = &sync.WaitGroup{}
 	l.wg.Add(1)
-	l.usageBelowLimit = make(chan struct{})
+	l.waitForBelowLimit = make(chan struct{})
 	if l.CurrentProcessOnly {
 		var err error
 		l.self, err = process.NewProcess(int32(os.Getpid()))
@@ -80,23 +81,25 @@ func (l *Limiter) Wait() {
 }
 
 func (l *Limiter) WaitContext(ctx context.Context) {
-	if ctx.Err() != nil {
+	if l.currentlyBelowLimit {
+		// If the CPU usage is already below the limit, we can return immediately
 		return
 	}
+	if ctx.Err() != nil {
+		// Same if the context is already done
+		return
+	}
+	// Otherwise, we wait for the CPU usage to go below the limit
+	// or the context to be done
 	select {
-	case <-l.usageBelowLimit:
+	case <-l.waitForBelowLimit:
 	case <-ctx.Done():
 	}
 }
 
 // AboveLimit reports if the CPU usage is above MaxCPUUsage
 func (l *Limiter) AboveLimit() bool {
-	select {
-	case <-l.usageBelowLimit:
-		return false
-	default:
-		return true
-	}
+	return !l.currentlyBelowLimit
 }
 
 func (l *Limiter) run() {
@@ -107,18 +110,20 @@ func (l *Limiter) run() {
 		all1     float64
 		all2     float64
 		cpuUsage float64
-		locked   = true
 		m        = make([]float64, l.Measurements) // measurements
 	)
+	defer func() {
+		// Close the channel if it was blocking, so that Wait() can return
+		if !l.currentlyBelowLimit {
+			close(l.waitForBelowLimit)
+		}
+	}()
 	tk := time.NewTicker(l.MeasureInterval)
 	defer tk.Stop()
 	busy2, all2 = l.getBusy()
 	var counter int
 	for range tk.C {
 		if l.stop {
-			if locked {
-				close(l.usageBelowLimit)
-			}
 			break
 		}
 		busy1, all1 = busy2, all2
@@ -126,16 +131,16 @@ func (l *Limiter) run() {
 		cpuUsage = getCPUUsage(busy1, all1, busy2, all2)
 		m[counter] = cpuUsage
 		if average(m) > l.MaxCPUUsage {
-			if !locked {
+			if l.currentlyBelowLimit {
 				// Create a new, blocking channel to signal that the CPU usage is above the limit
-				l.usageBelowLimit = make(chan struct{})
-				locked = true
+				l.waitForBelowLimit = make(chan struct{})
+				l.currentlyBelowLimit = false
 			}
 		} else {
-			if locked {
+			if !l.currentlyBelowLimit {
 				// Close the channel to signal that the CPU usage is below the limit
-				close(l.usageBelowLimit)
-				locked = false
+				close(l.waitForBelowLimit)
+				l.currentlyBelowLimit = true
 			}
 		}
 		counter++
